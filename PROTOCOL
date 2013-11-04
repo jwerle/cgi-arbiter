@@ -1,0 +1,21 @@
+cgi-arbiter protocol
+====================
+
+This specifcation defines the cgi-arbiter protocol for half-duplex
+communication.
+
+---
+
+Messages:
+
+All messages are transmitted using the Advanced Messaging Protocol (AMP) which
+can be described in the following format:
+
+      0        1 2 3 4     <length>    ...
++------------+----------+------------+
+| <ver/argc> | <length> |   <data>   | additional arguments
++------------+----------+------------+
+
+Further information can be found here https://github.com/visionmedia/node-amp
+
+

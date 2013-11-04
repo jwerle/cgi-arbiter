@@ -1,0 +1,42 @@
+{
+  "name": "cgi-arbiter",
+  "version": "0.0.1",
+  "description": "Route http requests to a CGI",
+  "main": "index.js",
+  "preferGlobal": true,
+  "bin": {
+    "cgi-arbiter": "./bin/cgi-arbiter",
+    "cgia": "./bin/cgi-arbiter"
+  },
+  "scripts": {
+    "test": "make test"
+  },
+  "keywords": [
+    "route",
+    "cgi",
+    "http"
+  ],
+  "author": "Joseph Werle <joseph.werle@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/jwerle/cgi-arbiter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jwerle/cgi-arbiter/issues"
+  },
+  "dependencies": {
+    "cgi": "~0.2.0",
+    "troute": "0.0.6",
+    "commander": "~2.0.0",
+    "through": "~2.3.4",
+    "ini": "~1.1.0",
+    "touch": "0.0.2",
+    "mkdirp": "~0.3.5",
+    "xtend": "~2.1.1",
+    "connect": "~2.11.0",
+    "dot": "~1.0.2",
+    "amp": "~0.3.0",
+    "amp-message": "~0.1.0"
+  }
+}

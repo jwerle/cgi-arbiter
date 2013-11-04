@@ -1,0 +1,427 @@
+#!/usr/bin/env node
+
+process.env.DEBUG = "";
+
+const HOME = process.env.HOME;
+const USER = process.env.USER;
+const CGIA_PATH = process.env.CGIA_PATH || '/etc/cgia';
+const CGIA_PORT = process.env.CGIA_PORT || 8080;
+
+/**
+ * Module dependencies
+ */
+
+var program = require('commander')
+  , through = require('through')
+  , extend = require('xtend')
+  , connect = require('connect')
+  , util = require('util')
+  , ini = require('ini')
+  , net = require('net')
+  , http = require('http')
+  , url = require('url')
+  , fs = require('fs')
+  , path = require('path')
+  , touch = require('touch').sync
+  , mkdirp = require('mkdirp')
+  , cp = require('child_process')
+  , dot = require('dot')
+  , troute = require('troute')
+  , protocol = require('../protocol.js')
+
+var stdout = process.stdout;
+var stdin = process.stdin;
+var stderr = process.stderr;
+var puts = console.log
+var exit = process.exit;
+var port = 3000;
+var fread = fs.readFileSync
+var fexists = fs.existsSync;
+var pjoin = path.join;
+var presolve = path.resolve;
+var prefix = CGIA_PATH;
+var conf = null;
+var tmp = null;
+var confpath = null
+var confStr = null
+var server = null;
+var app = null;
+var port = null;
+var socket = null;
+var arbiter = null;
+var servers = null;
+var version = null;
+
+// override varname in dot scope
+dot.templateSettings = extend(dot.templateSettings, {
+  varname: 'cgi',
+  strip: false
+});
+
+function error () {
+  return fmtprefix('verbose').apply(null, arguments);
+}
+
+// out puts verbose information
+// if the verbose flag is present
+function verbose () {
+  if (true != program.verbose) return;
+  return fmtprefix('verbose').apply(null, arguments);
+}
+
+// prints to stderr with a 'warn: '
+// prefixed to output
+function warn () {
+  var args = [stderr, 'warn: '+ arguments[0]].concat([].slice.call(arguments, 1));
+  fprintf.apply(null, args);
+  fprintf(stderr, "\n");
+}
+
+// creates a format function with
+// a prefix
+function fmtprefix (name) {
+  return function () {
+    var args = [name+': '+ arguments[0]].concat([].slice.call(arguments, 1));
+    printf.apply(null, args);
+    printf("\n");
+  }
+}
+
+// prints to stream
+// in with formated text
+function fprintf (stream, fmt /*, ...*/) {
+  stream.write(util.format.apply(null, [].slice.call(arguments, 1)));
+}
+
+// outputs a missing flag error
+// and exits with return code `1`
+function missingflag (flag) {
+  error("missing `--%s' option", flag);
+  exit(1);
+}
+
+// this will generate a random hex
+// based id that each connection
+// is assigned
+function hexid () {
+  return Math.floor((Math.random() * 10e10)).toString(16);
+}
+
+// simple implementation of printf
+// utilizing util.format
+function printf (fmt /*, ...*/) {
+  stdout.write(util.format.apply(this, arguments));
+}
+
+// return the char code at index 0
+function code (s) {
+  return s.charCodeAt(s);
+}
+
+// overload `helpInformation`
+program.helpInformation = function (rc) {
+  return [
+      "usage: cgia <command> [--prefix <path>] [--conf <path>]"
+    , "            [--port <port>] [--socket <path>]"
+    , "            [--verbose] [--help] [--version]"
+    , (0 === rc) ? "" : [
+        this.commandHelp()
+          .replace(/^\s+Commands\:/, "commands:")
+          .replace(/^\s+/gm, '  ')
+       , "options:"
+       , this.optionHelp().replace(/^/gm, '  ')
+       , ""
+       , "See `man cgia` for more information."
+      ].join('\n')
+    , ""
+  ].join('\n');
+};
+
+// overload `unknownOption`
+program.unknownOption = function(flag){
+  error("unknown option `%s'", flag);
+  printf(this.helpInformation(0));
+  printf("\n");
+  exit(1);
+};
+
+// init program
+program.version((version = require('../package').version))
+  .option("-p,--port <port>", "port to listen on (default: "+ CGIA_PORT +")")
+  .option("-s,--socket <path>", "socket to listen on")
+  .option("--prefix <prefix>", "set cgia prefix (default: /etc/cgia)")
+  .option("--conf <path>", "configuration file (default: /etc/cgia/conf/cgia.ini)")
+  .option("--verbose", "enable verbose output")
+  .command("init")
+    .description("initializes a cgia directory")
+    .action(init)
+
+program.parse(process.argv);
+
+function init () {
+  prefix = program.prefix = program.prefix || CGIA_PATH;
+  verbose("prefix path set to '%s'", prefix);
+
+  if (fexists(prefix)) {
+    error("'%s' already exists");
+    exit(1);
+  }
+
+  var dirs = [];
+  var files = [];
+
+  dirs.push(
+      prefix
+    , pjoin(prefix, 'conf')
+  );
+
+  files.push(
+      pjoin(prefix, 'conf/cgia.ini')
+  );
+
+  verbose("initializing new cgia directory '%s'", prefix);
+
+  mkdirs(mkfiles)
+
+  function mkdirs (done) {
+    var dir = null;
+    ~function next (err) {
+      if (err) {
+        error(String(err));
+        exit(1);
+      }
+
+      if (null != (dir = dirs.shift())) {
+        verbose("creating directory '%s", dir);
+        mkdirp(dir, next);
+      } else {
+        done();
+      }
+    }();
+  }
+
+  function mkfiles () {
+    var file = null;
+    ~function next (err) {
+      if (err) {
+        error(String(err));
+        exit(1);
+      }
+
+      if (null != (file = files.shift())) {
+        verbose("creating file '%s'", file);
+        touch(file);
+      } else {
+        done();
+      }
+    }();
+  }
+
+  function done () {
+    verbose("ok");
+    exit(0);
+  }
+}
+
+function gwrite (chunk) {
+  verbose("gateway (write) '%s'", String(chunk));
+}
+
+function gend (chunk) {
+  verbose("gateway (end) '%s'", String(chunk));
+}
+
+function passthrough (server, req, res, next) {
+  var peer = server.connect(req);
+  var h = null;
+  var headers = [
+    [req.method.toUpperCase(), url.parse(req.url).pathname, 'HTTP/1.1'].join(' ')
+  ];
+
+  verbose("passthrough: (%s) '%s'", server.name, req.url);
+
+  peer.on('error', function () {
+    warn("handshake: bad gateway (%) '%s'", server.name, req.url);
+    res.statusCode = 502;
+    res.end();
+  });
+
+  verbose("headers: (%s) '%s'", server.name, req.url);
+
+  for (h in req.headers) {
+    var t = h.split('-').map(function (s) {
+      return s[0].toUpperCase() + s.slice(1);
+    }).join('-');
+    var line = t + ': '+ req.headers[h];
+    headers.push(line);
+    verbose("  %s", line);
+  }
+
+  peer.write(headers.join('\n'))
+}
+
+function createEnv (name, req) {
+  var env = {};
+  var u = url.parse(req.url)
+
+  env.SERVER_SOFTWARE = 'cgia/'+ version;
+  env.SERVER_NAME = 'cgia';
+  env.GATEWAY_INTERFACE = process.env.SERVER_SOFTWARE;
+  env.SERVER_PROTOCOL = 'HTTP/1.1';
+  env.SERVER_PORT = u.port || 80;
+  env.REQUEST_METHOD = req.method;
+  // env.PATH_INFO = process.env.PATH_INFO;
+  // env.PATH_TRANSLATED = process.env.PATH_TRANSLATED;
+  env.SCRIPT_NAME = name;
+  env.QUERY_STRING = u.query;
+  env.REMOTE_HOST = req.headers.host;
+  env.REMOTE_ADDR = env.REMOTE_HOST;
+  env.USER_AGENT = req.headers['user-agent'];
+  // env.AUTH_TYPE = process.env.AUTH_TYPE;
+  // env.REMOTE_USER = process.env.REMOTE_USER;
+  // env.REMOTE_IDENT = process.env.REMOTE_IDENT;
+
+  return env;
+}
+
+process.env = extend(process.env, {
+  SERVER_SOFTWARE: null,
+  SERVER_NAME: null,
+  GATEWAY_INTERFACE: null,
+  SERVER_PROTOCOL: null,
+  SERVER_PORT: null,
+  REQUEST_METHOD: null,
+  PATH_INFO: null,
+  PATH_TRANSLATED: null,
+  SCRIPT_NAME: null,
+  QUERY_STRING: null,
+  REMOTE_HOST: null,
+  REMOTE_ADDR: null,
+  AUTH_TYPE: null,
+  REMOTE_USER: null,
+  REMOTE_IDENT: null,
+  CONTENT_TYPE: null,
+  CONTENT_LENGTH: null
+});
+
+prefix = program.prefix = program.prefix || CGIA_PATH;
+confpath = program.conf || pjoin(prefix, 'conf', 'cgia.ini');
+port = program.port || CGIA_PORT;
+socket = program.socket;
+app = connect();
+server = http.createServer(app);
+arbiter = through(gwrite, gend);
+servers = {};
+// parse scope variables for ini file
+// in dot syntax
+confStr = dot.template(String(fread(confpath)))({
+  env: process.env
+});
+
+// parse ini after dot template parsing
+conf = ini.parse(confStr);
+
+for (tmp in conf) {
+  ~function (tmp) {
+    var n = null;
+    var m = null;
+    var sock = null;
+    var serv = null;
+    var p = null;
+
+    if (null != (m = tmp.match(/^server\s+(.*)$/))) {
+      n = m[1];
+      serv = servers[n] = conf[tmp];
+      serv.name = n;
+
+      if (false == serv.active) {
+        return;
+      }
+
+      if (null != serv.script) {
+        serv.connect = function (req) {
+          var child = null;
+          var stream = through();
+          var env = createEnv(presolve(serv.script), req);
+          var u = url.parse(req.url);
+
+          child = cp.spawn(presolve(serv.script), [], {env: env});
+          child.stdout.pipe(stream);
+          child.stderr.on('data', function (err) {
+            stream.emit('error', err);
+          });
+
+          child.stderr.on('error', function (err) {
+            stream.emit('error', err);
+          });
+
+          return stream;
+        };
+      } else if (null != serv.host) {
+        var u = url.parse(serv.host);
+        var port = u.port || serv.port;
+        var sock = serv.sock || serv.socket
+
+        if (null == (port || sock)) {
+          warn("missing 'port' or 'socket' for server '%s'", n);
+        }
+
+        serv.connect = function (req) {
+          var conn = null;
+          var peer = null;
+
+          if (null != port) {
+            conn = net.connect({port: port, host: u.hostname}, onconnect);
+          } else if (null != sock) {
+            conn = net.connect({path: sock}, onconnect);
+          }
+
+          function onconnect () {
+            verbose("peer connected '%s'", serv.host);
+          }
+
+          peer = protocol(conn);
+          return peer;
+        };
+      }
+    }
+  }(tmp);
+}
+// free value
+tmp = null;
+if (null != socket) {
+  verbose("listening on socket '%s'", socket);
+  server.listen(socket);
+} else {
+  verbose("listen on port '%d'", port);
+  server.listen(port);
+}
+
+var route = null;
+for (tmp in servers) {
+  if (null != servers[tmp].match) {
+    route = RegExp(servers[tmp].match);
+  } else if (null != servers[tmp].pattern) {
+    route = servers[tmp].pattern;
+  } else {
+    continue;
+  }
+
+  app.use(troute('*',
+          route,
+          passthrough.bind(null, servers[tmp])));
+}
+
+app.use(function (req, res, next) {
+  verbose("request: (not found) '%s'", req.url);
+  res.statusCode = 404;
+  res.end();
+});
+
+arbiter.on('readable', function () {
+  var chunk = null;
+
+  while (null != (chunk = arbiter.read())) {
+    verbose("arbiter chunk: '%s'", String(chunk));
+  }
+});
